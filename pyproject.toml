@@ -1,0 +1,25 @@
+[project]
+name = "pyspace"
+version = "0.1.0"
+description = "Library used to handle geometry and reference frames."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "bidict>=0.23.1",
+    "numpy>=2.4.3",
+    "scipy>=1.17.1",
+    "treelib>=1.8.0",
+    "wrapt>=2.1.2",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+    "perfplot>=0.10.2",
+    "pytest>=9.0.2",
+    "ruff>=0.15.7",
+]
+visuals = [
+    "graphviz>=0.21",
+    "matplotlib>=3.10.8",
+]
