@@ -1,9 +1,5 @@
-"""Tree of nodes backed by a sparse adjacency matrix (pytransform3d-style).
-
-Relationships are stored as directed parent→child edges in parallel index lists
-``i`` (parent column index) and ``j`` (child column index), then folded into a
-CSR matrix ``connections`` for graph algorithms — mirroring
-:class:`pytransform3d.transform_manager.TransformGraphBase`.
+"""
+Graph of reference frames and transforms between them.
 """
 
 from __future__ import annotations
@@ -12,19 +8,18 @@ import os
 import uuid
 from dataclasses import dataclass
 from typing import (
-    Any,
     Callable,
     NewType,
     Protocol,
     Self,
+    TypeVar,
 )
 
 import numpy as np
 from bidict import bidict
-from numpy._typing import ArrayLike
+from numpy.typing import ArrayLike
 from scipy.sparse import csgraph
-from scipy.spatial.transform import RigidTransform as RigidTransform
-from scipy.spatial.transform import Rotation as Rotation
+from scipy.spatial.transform import RigidTransform, Rotation
 
 FrameID = NewType("FrameID", str)
 TransformID = NewType("TransformID", str)
@@ -76,7 +71,7 @@ class Frame:
 
 class FrameTransform:
     """
-    Transforms from pose.frame to...
+    Rigid transform from `from_frame` coordinates into `to_frame` coordinates.
     """
     def __init__(
         self,
@@ -146,9 +141,17 @@ class FrameTransform:
         )
 
     def apply(self, obj: FrameTransformable) -> FrameTransformable:
-        assert obj.frame == self._from_frame
+        if obj.frame != self._from_frame:
+            raise GraphError(
+                f"Cannot apply {self}: object is in {obj.frame}, "
+                f"expected {self._from_frame}"
+            )
         out = obj.apply_frame_transform(self)
-        assert out.frame == self._to_frame
+        if out.frame != self._to_frame:
+            raise GraphError(
+                f"Transform application produced object in {out.frame}, "
+                f"expected {self._to_frame}"
+            )
         return out
         
     def __repr__(self) -> str:
@@ -173,11 +176,13 @@ class GraphCache:
 class Graph:
     def __init__(self) -> None:
         # reference frames (nodes)
-        self._frame_id_generator: Callable[[], FrameID] = lambda: FrameID(uuid.uuid4())
+        self._frame_id_generator: Callable[[], FrameID] = lambda: FrameID(
+            str(uuid.uuid4())
+        )
         self._frames: set[Frame] = set()
         self._frame_id_to_frame: dict[FrameID, Frame] = {}
-        
-        # refernce frame transforms (edges)
+
+        # reference frame transforms (edges)
         self._transforms: set[FrameTransform] = set()
         self._frames_to_transform: dict[tuple[Frame, Frame], FrameTransform] = {}
 
@@ -229,7 +234,11 @@ class Graph:
 
         from_frame = tform.from_frame
         to_frame = tform.to_frame
-        assert from_frame in self._frames and to_frame in self._frames
+        if from_frame not in self._frames or to_frame not in self._frames:
+            raise GraphError(
+                "Both transform frames must already exist in the graph: "
+                f"{from_frame} -> {to_frame}"
+            )
         
         if (from_frame, to_frame) in self._frames_to_transform:
             raise GraphError(f"Transform between {from_frame} and {to_frame} already exists")
@@ -302,9 +311,9 @@ class Graph:
 
     def transform(
         self,
-        obj: FrameTransformable,
+        obj: TFrameTransformable,
         to_frame: Frame | FrameID,
-    ) -> FrameTransformable:
+    ) -> TFrameTransformable:
         """Transform an object from its current frame to a target frame.
         
         TODO: Cache transforms. At least for the source and target frames, possibly
@@ -399,6 +408,9 @@ class FrameTransformable(Protocol):
 
     def to(self, frame: Frame | FrameID) -> Self:
         return self.frame.graph.transform(self, frame)
+
+
+TFrameTransformable = TypeVar("TFrameTransformable", bound=FrameTransformable)
 
 
 class Location(FrameTransformable):
@@ -534,7 +546,11 @@ class Orientation(FrameTransformable):
 
 class Pose(FrameTransformable):
     def __init__(self, location: Location, orientation: Orientation) -> None:
-        assert location.frame == orientation.frame
+        if location.frame != orientation.frame:
+            raise ValueError(
+                "Pose requires location and orientation in the same frame; "
+                f"got {location.frame} and {orientation.frame}"
+            )
         self._location = location
         self._orientation = orientation
 
