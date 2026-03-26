@@ -771,6 +771,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "bidict" },
+    { name = "graphviz" },
     { name = "numpy" },
     { name = "scipy" },
     { name = "treelib" },
@@ -792,6 +793,7 @@ visuals = [
 [package.metadata]
 requires-dist = [
     { name = "bidict", specifier = ">=0.23.1" },
+    { name = "graphviz", extras = ["visuals"], specifier = ">=0.21" },
     { name = "numpy", specifier = ">=2.4.3" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "treelib", specifier = ">=1.8.0" },

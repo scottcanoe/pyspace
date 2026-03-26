@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "bidict>=0.23.1",
+    "graphviz[visuals]>=0.21",
     "numpy>=2.4.3",
     "scipy>=1.17.1",
     "treelib>=1.8.0",
