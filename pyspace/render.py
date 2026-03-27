@@ -12,19 +12,20 @@ DEFAULT_GRAPHVIZ_DIRECTORY = Path(__file__).parent.parent / "local" / "graphviz"
 
 
 def render_graph(
-    graph: Graph,
+    graph,
     filename: str = "graph",
     directory: os.PathLike | None = None,
     view: bool = False,
-    **kwargs) -> None:
+    **kwargs,
+) -> None:
 
     if directory is None:
         directory = DEFAULT_GRAPHVIZ_DIRECTORY
     g = Digraph()
-    for frame in graph.frames:
-        g.node(frame.frame_id)
-    for transform in graph.transforms:
-        g.edge(transform.from_frame.frame_id, transform.to_frame.frame_id)
+    for node_id, node in graph.nodes.items():
+        g.node(node_id)
+    for edge_id, edge in graph.edges.items():
+        g.edge(edge.u.node_id, edge.v.node_id)
     g.render(filename=filename, directory=directory, **kwargs)
 
     if view:

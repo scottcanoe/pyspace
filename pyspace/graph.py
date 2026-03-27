@@ -1,14 +1,12 @@
-"""
-Graph of reference frames and transforms between them.
-"""
-
 from __future__ import annotations
 
 import os
 import uuid
 from dataclasses import dataclass
 from typing import (
+    Any,
     Callable,
+    NamedTuple,
     NewType,
     Protocol,
     Self,
@@ -17,317 +15,266 @@ from typing import (
 
 import numpy as np
 from bidict import bidict
-from numpy.typing import ArrayLike
 from scipy.sparse import csgraph
-from scipy.spatial.transform import RigidTransform, Rotation
 
-FrameID = NewType("FrameID", str)
-TransformID = NewType("TransformID", str)
+NodeID = NewType("NodeID", str)
+EdgeID = NewType("EdgeID", str)
+UID = NewType("UID", int)
 
 
 class GraphError(Exception):
     pass
 
 
+class Node:
+    """A node in the graph.
 
-
-class Frame:
-    """A reference frame."""
+    Do not create these directly. They should always be created by a `Graph` instance.
+    """
 
     def __init__(
         self,
         graph: Graph,
-        frame_id: FrameID,
+        node_id: NodeID,
+        hash_value: int,
     ) -> None:
         self._graph = graph
-        self._frame_id = frame_id
+        self._node_id = node_id
+        self._hash_value = hash_value
 
     @property
     def graph(self) -> Graph:
         return self._graph
 
     @property
-    def frame_id(self) -> FrameID:
-        return self._frame_id
+    def node_id(self) -> NodeID:
+        return self._node_id
 
-    def location(self, array: ArrayLike) -> Location:
-        return Location(array, self)
-
-    def displacement(self, array: ArrayLike) -> Displacement:
-        return Displacement(array, self)
-    
-    def orientation(self, rotation: Rotation) -> Orientation:
-        return Orientation(rotation, self)
-
-    def pose(self, translation: ArrayLike, rotation: Rotation) -> Pose:
-        return Pose(
-            location=Location(translation, self),
-            orientation=Orientation(rotation, self),
-        )
+    @property
+    def data(self) -> Any:
+        return self._graph._node_to_data["data"][self]
 
     def __repr__(self) -> str:
-        return f"Frame({self.frame_id})"
+        return f"{self.__class__.__name__}({self._node_id})"
+
+    def __eq__(self, other: Any) -> bool:
+        return hash(self) == hash(other)
+
+    def __hash__(self) -> int:
+        return self._hash_value
 
 
-class FrameTransform:
-    """
-    Rigid transform from `from_frame` coordinates into `to_frame` coordinates.
-    """
+class Edge:
     def __init__(
         self,
-        transform: RigidTransform,
-        from_frame: Frame,
-        to_frame: Frame,
+        graph: Graph,
+        edge_id: EdgeID,
+        hash_value: int,
     ) -> None:
-        self._transform = transform
-        self._from_frame = from_frame
-        self._to_frame = to_frame
+        self._graph = graph
+        self._edge_id = edge_id
+        self._hash_value = hash_value
 
     @property
-    def from_frame(self) -> Frame:
-        return self._from_frame
-    
-    @property
-    def to_frame(self) -> Frame:
-        return self._to_frame
+    def graph(self) -> Graph:
+        return self._graph
 
     @property
-    def translation(self) -> np.ndarray:
-        return self._transform.translation
+    def edge_id(self) -> EdgeID:
+        return self._edge_id
 
     @property
-    def rotation(self) -> Rotation:
-        return self._transform.rotation
-    
-    def as_components(self) -> tuple[np.ndarray, Rotation]:
-        return self._transform.translation, self._transform.rotation
-    
-    def as_rigid_transform(self) -> RigidTransform:
-        return self._transform
-    
-    @staticmethod
-    def from_components(
-        translation: ArrayLike,
-        rotation: Rotation,
-        from_frame: Frame,
-        to_frame: Frame,
-    ) -> FrameTransform:
-        transform = RigidTransform.from_components(
-            rotation=rotation, translation=translation,
-        )
-        return FrameTransform(
-            transform=transform,
-            from_frame=from_frame,
-            to_frame=to_frame,
-        )
-    
-    @staticmethod
-    def from_rigid_transform(
-        transform: RigidTransform,
-        from_frame: Frame,
-        to_frame: Frame,
-        ) -> FrameTransform:
-        return FrameTransform(
-            transform=transform,
-            from_frame=from_frame,
-            to_frame=to_frame,
-        )
+    def u(self) -> Node:
+        return self._graph._edge_to_uv[self].u
 
-    def inv(self) -> FrameTransform:
-        return FrameTransform(
-            transform=self._transform.inv(),
-            from_frame=self._to_frame,
-            to_frame=self._from_frame,
-        )
+    @property
+    def v(self) -> Node:
+        return self._graph._edge_to_uv[self].v
 
-    def apply(self, obj: FrameTransformable) -> FrameTransformable:
-        if obj.frame != self._from_frame:
-            raise GraphError(
-                f"Cannot apply {self}: object is in {obj.frame}, "
-                f"expected {self._from_frame}"
-            )
-        out = obj.apply_frame_transform(self)
-        if out.frame != self._to_frame:
-            raise GraphError(
-                f"Transform application produced object in {out.frame}, "
-                f"expected {self._to_frame}"
-            )
-        return out
-        
+    @property
+    def data(self) -> Any:
+        return self._graph._edge_to_data[self]
+
     def __repr__(self) -> str:
-        return f"FrameTransform({self._from_frame.frame_id} -> {self._to_frame.frame_id})"
+        return f"{self.__class__.__name__}({self._edge_id})"
+
+    def __eq__(self, other: Any) -> bool:
+        return hash(self) == hash(other)
+
+    def __hash__(self) -> int:
+        return self._hash_value
 
 
+class UV(NamedTuple):
+    u: Node
+    v: Node
 
-@dataclass(frozen=True)
-class PathStep:
-    transform: FrameTransform
+
+class PathStep(NamedTuple):
+    edge: Edge
     inverse: bool
 
 
 @dataclass
 class GraphCache:
-    
-    frame_index: bidict[Frame, int]
-    adjacency_matrix: np.ndarray
+    node_index: bidict[Node, int]
+    edge_directions: np.ndarray
     predecessors: np.ndarray
+
+
+def auto_edge_id_from_nodes(u: Node, v: Node, sep: str = "->") -> EdgeID:
+    return EdgeID(f"{u.node_id}{sep}{v.node_id}")
+
+
+@dataclass(frozen=True)
+class GraphToken:
+    _id: str
 
 
 class Graph:
     def __init__(self) -> None:
-        # reference frames (nodes)
-        self._frame_id_generator: Callable[[], FrameID] = lambda: FrameID(
-            str(uuid.uuid4())
-        )
-        self._frames: set[Frame] = set()
-        self._frame_id_to_frame: dict[FrameID, Frame] = {}
+        # Unique token for identifying theis graph instance. For hash stability.
+        self._token = GraphToken(str(uuid.uuid4()))
 
-        # reference frame transforms (edges)
-        self._transforms: set[FrameTransform] = set()
-        self._frames_to_transform: dict[tuple[Frame, Frame], FrameTransform] = {}
+        # Nodes
+        self._node_id_generator = lambda: NodeID(str(uuid.uuid4()))
+        self._nodes: bidict[NodeID, Node] = bidict()
+        self._node_to_data: dict[NodeID, Any] = {}
 
-        # shortest paths
+        # Edges
+        self._edge_id_generator: auto_edge_id_from_nodes
+        self._edges: bidict[EdgeID, Edge] = bidict()
+        self._edge_to_uv: bidict[UV, Edge] = bidict()
+        self._edge_to_data: dict[Edge, Any] = {}
+
+        # Path-finding
         self._cache: GraphCache | None = None
 
     @property
-    def frames(self) -> set[Frame]:
-        return set(self._frames)
+    def nodes(self) -> bidict[NodeID, Node]:
+        return bidict(self._nodes)
 
     @property
-    def transforms(self) -> set[FrameTransform]:
-        return set(self._transforms)
+    def edges(self) -> bidict[EdgeID, Edge]:
+        return bidict(self._edges)
 
     @property
     def size(self) -> int:
-        return len(self._frames)
+        return len(self._nodes)
 
-    def add_frame(
+    def add_node(
         self,
-        frame_id: FrameID | None = None,
-    ) -> Frame:
-        """Add a frame to the graph."""
+        node_id: NodeID | None = None,
+        data: Any | None = None,
+    ) -> Node:
+        """Add a node to the graph."""
 
-        # Check `uid` won't clash.
-        frame_id = self._frame_id_generator() if frame_id is None else frame_id
-        if frame_id in self._frame_id_to_frame:
-            raise GraphError(f"Frame ID {frame_id} already in use.")
-        
-        frame = Frame(graph=self, frame_id=frame_id)
-        self._frames.add(frame)
-        self._frame_id_to_frame[frame_id] = frame
+        # Check `node_id` is avaialable.
+        node_id = self._node_id_generator() if node_id is None else node_id
+        if node_id in self._nodes:
+            raise GraphError(f"Node ID {node_id} already in use.")
+
+        hash_value = hash((self._token, node_id))
+        node = Node(graph=self, node_id=node_id, hash_value=hash_value)
+        self._nodes[node_id] = node
+        self._node_to_data[node] = data
         self._cache = None
-        return frame
+        return node
 
-    def remove_frame(self, frame: Frame | FrameID) -> None:
-        frame = self._as_valid_frame(frame)
-        self._frames.discard(frame)
-        self._frame_id_to_frame.pop(frame.frame_id)
+    def remove_node(self, node: Node | NodeID) -> None:
+        node = self._as_valid_node(node)
+        self._nodes.pop(node.node_id)
+        self._node_to_data.pop(node.node)
         self._cache = None
-        transforms_to_remove = []
-        for (from_frame, to_frame), tform in self._frames_to_transform.items():
-            if frame in (from_frame, to_frame):
-                transforms_to_remove.append(tform)
-        for transform in transforms_to_remove:
-            self.remove_transform(transform)
-
-    def add_transform(self, tform: FrameTransform) -> FrameTransform:
-
-        from_frame = tform.from_frame
-        to_frame = tform.to_frame
-        if from_frame not in self._frames or to_frame not in self._frames:
-            raise GraphError(
-                "Both transform frames must already exist in the graph: "
-                f"{from_frame} -> {to_frame}"
-            )
-        
-        if (from_frame, to_frame) in self._frames_to_transform:
-            raise GraphError(f"Transform between {from_frame} and {to_frame} already exists")
-        
-        if (to_frame, from_frame) in self._frames_to_transform:
-            raise GraphError(f"Inverse transform between {to_frame} and {from_frame} already exists")
-        
-        self._transforms.add(tform)
-        self._frames_to_transform[(from_frame, to_frame)] = tform
+        for uv, edge in self._edges.items():
+            if node in uv:
+                self.remove_edge(edge)
         self._cache = None
-        return tform
 
-    def remove_transform(self, tform: FrameTransform) -> None:
-        
-        self._transforms.remove(tform)
-        self._frames_to_transform.pop((tform.from_frame, tform.to_frame))
-        # Remove inverse transform if it exists.
-        self._frames_to_transform.pop((tform.to_frame, tform.from_frame), None)
+    def add_edge(
+        self,
+        u: Node | NodeID,
+        v: Node | NodeID,
+        edge_id: EdgeID | None = None,
+        data: Any | None = None,
+    ) -> Edge:
+        u = self._as_valid_node(u)
+        v = self._as_valid_node(v)
+        uv = UV(u, v)
+        if uv in self._edge_to_uv.values():
+            raise GraphError(f"Edge from {u} --> {v} already exists")
+
+        if UV(v, u) in self._edge_to_uv.values():
+            raise GraphError(f"Edge {u} <-- {v} already exists (inverse)")
+
+        if edge_id is None:
+            edge_id = auto_edge_id_from_nodes(u, v)
+        if edge_id in self._edges:
+            raise GraphError(f"Edge ID {edge_id} already in use.")
+
+        hash_value = hash((self._token, edge_id))
+        edge = Edge(graph=self, edge_id=edge_id, hash_value=hash_value)
+        self._edges[edge_id] = edge
+        self._edge_to_uv[edge] = uv
+        self._edge_to_data[edge] = data
         self._cache = None
-    
-    def clear_transforms(self) -> None:
-        self._transforms.clear()
-        self._frames_to_transform.clear()
+        return edge
+
+    def remove_edge(self, edge: Edge | EdgeID) -> None:
+        edge = self._as_valid_edge(edge)
+        self._edges.pop(edge.edge_id)
+        self._edge_to_uv.pop(UV(edge.u, edge.v))
+        self._edge_to_data.pop(edge)
+        self._cache = None
+
+    def clear_edges(self) -> None:
+        self._edges.clear()
+        self._edge_to_uv.clear()
+        self._edge_to_data.clear()
         self._cache = None
 
     def shortest_path(
         self,
-        from_frame: Frame | FrameID,
-        to_frame: Frame | FrameID,
+        source: Node | NodeID,
+        target: Node | NodeID,
     ) -> list[PathStep]:
-        """Return transforms and inverse flags for path from start to end frames.
-
-        Returned transforms don't include the start transform.
+        """Return edges and edge directions for path between two nodes.
 
         Raises:
             RuntimeError: If start and end aren't connected.
 
         """
-        if not self._cache:
+        if self._cache is None:
             self._compute_shortest_paths()
-        
-        from_frame = self._as_valid_frame(from_frame)
-        to_frame = self._as_valid_frame(to_frame)
-        if from_frame == to_frame:
+
+        source = self._as_valid_node(source)
+        target = self._as_valid_node(target)
+        if source == target:
             return []
 
-        frame_index: bidict[Frame, int] = self._cache.frame_index
-        adjacency_matrix: np.ndarray = self._cache.adjacency_matrix
+        node_index: bidict[int, Node] = self._cache.node_index
+        edge_directions: np.ndarray = self._cache.edge_directions
         predecessors: np.ndarray = self._cache.predecessors
 
-        cur_frame: Frame = from_frame
-        cur_frame_index = frame_index[cur_frame]
-        target_frame_index = frame_index[to_frame]
-                
-        if predecessors[target_frame_index, cur_frame_index] < 0:
-            raise GraphError(f"No path found from {from_frame} to {to_frame}")
+        cur_node: Node = source
+        cur_node_index = node_index.inv[cur_node]
+        target_node_index = node_index.inv[target]
+
+        if predecessors[target_node_index, cur_node_index] < 0:
+            raise GraphError(f"No path found from {source} to {target}")
 
         path: list[PathStep] = []
-        while cur_frame_index != target_frame_index:
-            next_frame_index = predecessors[target_frame_index, cur_frame_index]
-            next_frame = frame_index.inv[next_frame_index]
-            inverse = bool(adjacency_matrix[next_frame_index, cur_frame_index] == -1)
-            frames = (next_frame, cur_frame) if inverse else (cur_frame, next_frame)
-            tform = self._frames_to_transform[frames]
-            step = PathStep(transform=tform, inverse=inverse)
+        while cur_node_index != target_node_index:
+            next_node_index = predecessors[target_node_index, cur_node_index]
+            next_node = node_index[next_node_index]
+            inverse = bool(edge_directions[next_node_index, cur_node_index] == -1)
+            u, v = (next_node, cur_node) if inverse else (cur_node, next_node)
+            edge = self._edge_to_uv.inv[UV(u, v)]
+            step = PathStep(edge=edge, inverse=inverse)
             path.append(step)
-            cur_frame, cur_frame_index = next_frame, next_frame_index
+            cur_node, cur_node_index = next_node, next_node_index
 
         return path
-
-    def transform(
-        self,
-        obj: TFrameTransformable,
-        to_frame: Frame | FrameID,
-    ) -> TFrameTransformable:
-        """Transform an object from its current frame to a target frame.
-        
-        TODO: Cache transforms. At least for the source and target frames, possibly
-        for the intermediate transforms as well.
-        """
-        path: list[PathStep] = self.shortest_path(obj.frame, to_frame)
-        transformed = obj
-        for step in path:
-            tform = step.transform
-            if step.inverse:
-                tform = tform.inv()
-            transformed = tform.apply(transformed)
-        return transformed
-
 
     def show(
         self,
@@ -335,8 +282,9 @@ class Graph:
         filename: str = "graph",
         directory: os.PathLike | None = None,
         **kwargs,
-    ) -> None:
+    ):
         from pyspace.render import render_graph
+
         return render_graph(
             self,
             view=view,
@@ -345,284 +293,86 @@ class Graph:
             **kwargs,
         )
 
-    def _as_valid_frame(self, frame: Frame | FrameID) -> Frame:
-        if frame in self._frames:
-            return frame
+    def _as_valid_node(self, node: Node | NodeID) -> Node:
         try:
-            return self._frame_id_to_frame[frame]
+            return self._nodes.get(node, self._nodes.inv.get(node))
         except KeyError:
-            raise GraphError(f"Frame {frame} not found in graph")
-    
+            raise GraphError(f"{node} not found in graph")
+
+    def _as_valid_edge(self, edge: Edge | EdgeID) -> Edge:
+        try:
+            return self._edges.get(edge, self._edges.inv.get(edge))
+        except KeyError:
+            raise GraphError(f"{edge} not found in graph")
 
     def _compute_shortest_paths(self) -> None:
         """Compute and store all shortest path info."""
-        
-        if len(self._frames) == 0:
+
+        if len(self._nodes) == 0:
             self._cache = GraphCache(
-                frame_index=bidict(),
-                adjacency_matrix=np.zeros((0, 0), dtype=int),
+                node_index=bidict(),
+                edge_directions=np.zeros((0, 0), dtype=np.int8),
                 predecessors=np.empty((0, 0), dtype=int),
             )
             return
 
-        frame_index = bidict({frame: i for i, frame in enumerate(self._frames)})
-        adjacency_matrix = np.zeros((len(self._frames), len(self._frames)), dtype=int)
-        for tform in self._transforms:
-            from_index = frame_index[tform.from_frame]
-            to_index = frame_index[tform.to_frame]
-            adjacency_matrix[to_index, from_index] = 1
-            adjacency_matrix[from_index, to_index] = -1
-        
+        node_index = bidict({i: node for i, node in enumerate(self._nodes.values())})
+        from_indices, to_indices = zip(
+            *(
+                (node_index.inv[edge.u], node_index.inv[edge.v])
+                for edge in self._edges.values()
+            )
+        )
+        edge_directions = np.zeros((len(self._nodes), len(self._nodes)), dtype=np.int8)
+        edge_directions[to_indices, from_indices] = 1
         _, predecessors = csgraph.shortest_path(
-            np.clip(adjacency_matrix, 0, 1),
+            edge_directions,
             unweighted=True,
             directed=False,
             method="D",
             return_predecessors=True,
         )
-        
+        edge_directions[from_indices, to_indices] = -1
+
         self._cache = GraphCache(
-            frame_index=frame_index,
-            adjacency_matrix=adjacency_matrix,
+            node_index=node_index,
+            edge_directions=edge_directions,
             predecessors=predecessors,
         )
-                
-    def __getitem__(self, frame_id: FrameID) -> Frame:
-        return self._frame_id_to_frame[frame_id]
+
+    def __getitem__(self, node_id: NodeID) -> Node:
+        return self._nodes[node_id]
 
 
 """
 --------------------------------------------------------------------------------------
-FrameTransformable Protocol (entities)
---------------------------------------------------------------------------------------
+Possible Constraints:
+ - Unique parent
+ - No cycles
+
+
 """
-
-
-class FrameTransformable(Protocol):
-    @property
-    def frame(self) -> Frame:
-        pass
-
-    def apply_frame_transform(self, transform: FrameTransform) -> Self:
-        pass
-
-    def to(self, frame: Frame | FrameID) -> Self:
-        return self.frame.graph.transform(self, frame)
-
-
-TFrameTransformable = TypeVar("TFrameTransformable", bound=FrameTransformable)
-
-
-class Location(FrameTransformable):
-    def __init__(self, array: ArrayLike, frame: Frame) -> None:
-        array = np.array(array, dtype=float)
-        if array.shape[-1] != 3:
-            raise ValueError(
-                f"Expected `array` to have shape (..., 3), got {array.shape}."
-            )
-        self._array = array
-        self._frame = frame
-
-    @property
-    def frame(self) -> Frame:
-        return self._frame
-
-    def as_array(self) -> np.ndarray:
-        return self._array.copy()
-
-    @staticmethod
-    def from_array(array: ArrayLike, frame: Frame) -> Location:
-        return Location(array, frame)
-
-    def apply_frame_transform(self, transform: FrameTransform) -> Location:
-        return Location(
-            transform.as_rigid_transform().apply(self._array),
-            frame=transform.to_frame,
-        )
-
-    def __array__(self, dtype: np.dtype | None = None, copy: bool = True) -> np.ndarray:
-        return self._array.copy() if copy else self._array
-
-    def __repr__(self) -> str:
-        return f"Location({self._array}, frame={self._frame.frame_id})"
-
-
-class Displacement(FrameTransformable):
-    def __init__(self, array: ArrayLike, frame: Frame) -> None:
-        array = np.array(array, dtype=float)
-        if array.shape[-1] != 3:
-            raise ValueError(
-                f"Expected `array` to have shape (..., 3), got {array.shape}."
-            )
-        self._array = array
-        self._frame = frame
-
-    @property
-    def frame(self) -> Frame:
-        return self._frame
-
-    def as_array(self) -> np.ndarray:
-        return self._array.copy()
-
-    @staticmethod
-    def from_array(array: ArrayLike, frame: Frame) -> Displacement:
-        return Displacement(array, frame)
-
-    def apply_frame_transform(self, transform: FrameTransform) -> Displacement:
-        return Displacement(
-            transform.rotation.apply(self._array),
-            frame=transform.to_frame,
-        )
-
-    def __array__(self, dtype: np.dtype | None = None, copy: bool = True) -> np.ndarray:
-        return self._array.copy() if copy else self._array
-
-    def __repr__(self) -> str:
-        return f"Displacement({self._array}, frame={self._frame.frame_id})"
-
-
-class Orientation(FrameTransformable):
-    def __init__(self, rotation: Rotation, frame: Frame) -> None:
-        self._rotation = rotation
-        self._frame = frame
-    
-    @property
-    def frame(self) -> Frame:
-        return self._frame
-
-    def as_euler(
-        self,
-        dims: str,
-        degrees: bool = False,
-    ) -> np.ndarray:
-        return self._rotation.as_euler(dims, degrees)
-    
-    def as_matrix(self) -> np.ndarray:
-        return self._rotation.as_matrix()
-
-    def as_rotation(self) -> Rotation:
-        return self._rotation
-
-    def as_quat(self, scalar_first: bool = True) -> np.ndarray:
-        return self._rotation.as_quat(scalar_first=scalar_first)
-
-    @staticmethod
-    def from_euler(
-        dims: str,
-        angles: ArrayLike,
-        frame: Frame,
-        degrees: bool = False,
-    ) -> Orientation:
-        return Orientation(Rotation.from_euler(dims, angles, degrees), frame)
-
-    @staticmethod
-    def from_matrix(matrix: ArrayLike, frame: Frame) -> Orientation:
-        return Orientation(Rotation.from_matrix(matrix), frame)
-
-    @staticmethod
-    def from_rotation(rotation: Rotation, frame: Frame) -> Orientation:
-        return Orientation(rotation, frame)
-
-    @staticmethod
-    def from_quat(
-        quat: ArrayLike,
-        frame: Frame,
-        scalar_first: bool = True,
-    ) -> Orientation:
-        return Orientation(
-            Rotation.from_quat(quat, scalar_first=scalar_first), frame,
-        )
-
-    def apply_frame_transform(self, transform: FrameTransform) -> Orientation:
-        return Orientation(
-            transform.rotation * self._rotation,
-            transform.to_frame,
-        )
-
-    def __repr__(self) -> str:
-        return f"Orientation({self._rotation}, frame={self._frame.frame_id})"
-
-
-
-class Pose(FrameTransformable):
-    def __init__(self, location: Location, orientation: Orientation) -> None:
-        if location.frame != orientation.frame:
-            raise ValueError(
-                "Pose requires location and orientation in the same frame; "
-                f"got {location.frame} and {orientation.frame}"
-            )
-        self._location = location
-        self._orientation = orientation
-
-    @property
-    def frame(self) -> Frame:
-        return self._location.frame
-
-    @property
-    def location(self) -> Location:
-        return self._location
-    
-    @property
-    def orientation(self) -> Orientation:
-        return self._orientation
-
-    def apply_frame_transform(self, transform: FrameTransform) -> Pose:
-        return Pose(
-            location=self._location.apply_frame_transform(transform),
-            orientation=self._orientation.apply_frame_transform(transform),
-        )
-
-    def __repr__(self) -> str:
-        return f"Pose(location={self.location}, orientation={self.orientation})"
-
-
-
-
 
 
 if __name__ == "__main__":
-
-    # Create a graph with reference frames A, B, and C.
+    # Create a graph with reference nodes A, B, and C.
     graph = Graph()
-    A = graph.add_frame("A")
-    B = graph.add_frame("B")
-    C = graph.add_frame("C")
+    root = graph.add_node("root")
+    a = graph.add_node("a")
+    b = graph.add_node("b")
+    c = graph.add_node("c")
+    x = graph.add_node("x")
+    y = graph.add_node("y")
+    z = graph.add_node("z")
 
-    # Define the location and orientation of frame B relative to frame A,
-    # and add the corresponding transform to the graph.
-    B_loc = np.array([0, 0, 0])
-    B_ori = Rotation.from_euler("xyz", [90, 0, 0], degrees=True)
-    B_to_A = FrameTransform.from_components(
-        translation=B_loc,
-        rotation=B_ori,
-        from_frame=B,
-        to_frame=A,
-    )
-    graph.add_transform(B_to_A)
+    graph.add_edge("a", "root")
+    graph.add_edge("b", "a")
+    graph.add_edge("c", "a")
+    graph.add_edge("x", "root")
+    graph.add_edge("y", "x")
+    graph.add_edge("z", "x")
 
-    # Define the location and orientation of frame C relative to frame B,
-    # and add the corresponding transform to the graph.
-    C_loc = np.array([0, 0, 0])
-    C_ori = Rotation.from_euler("xyz", [0, 90, 0], degrees=True)
-    C_to_B = FrameTransform.from_components(
-        translation=C_loc,
-        rotation=C_ori,
-        from_frame=C,
-        to_frame=B,
-    )
-    graph.add_transform(C_to_B)
-    
-    p_rel_C = Location([0, 0, -1], frame=C)
-    p_rel_B = p_rel_C.to(B)
-    p_rel_A = p_rel_B.to(A)
-
-    p_rel_C_round_trip = p_rel_A.to(C)
-
-    print(f"p[C]: {p_rel_C}")
-    print(f"p[B]: {p_rel_B}")
-    print(f"p[A]: {p_rel_A}")
-    print(f"p[C] (round-trip): {p_rel_C_round_trip}")
-
-    assert np.allclose(p_rel_C_round_trip.as_array(), p_rel_C.as_array())
-    assert p_rel_C_round_trip.frame == C
-
+    # graph.show(view=True)
+    path = graph.shortest_path("a", "z")
+    for step in path:
+        print(step)
