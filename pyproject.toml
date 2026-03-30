@@ -7,8 +7,11 @@ requires-python = ">=3.13"
 dependencies = [
     "bidict>=0.23.1",
     "graphviz>=0.21",
+    "imageio>=2.37.3",
     "networkx>=3.6.1",
     "numpy>=2.4.3",
+    "pygfx>=0.16.0",
+    "pyside6>=6.11.0",
     "pytransform3d>=3.14.4",
     "scipy>=1.17.1",
     "treelib>=1.8.0",
