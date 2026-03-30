@@ -9,7 +9,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 from scipy.spatial.transform import Rotation, Slerp
 
-from pyspace.frames import Transform
+from pyspace.frames import Location, Orientation, Pose
 
 DEFAULT_VERTICES = np.array(
     [
@@ -41,39 +41,52 @@ DEFAULT_EDGES = (
 )
 
 
-def interpolate_transforms(
-    keyframes: Sequence[Transform],
+def interpolate_poses(
+    keyframes: Sequence[Pose],
     *,
     frames_per_segment: int = 20,
-) -> list[Transform]:
+) -> list[Pose]:
     """Interpolate a smooth pose trajectory through transform keyframes."""
     if len(keyframes) < 2:
         raise ValueError("keyframes must contain at least two transforms")
     if frames_per_segment < 2:
         raise ValueError("frames_per_segment must be >= 2")
 
-    trajectory: list[Transform] = []
+    trajectory: list[Pose] = []
     for index in range(len(keyframes) - 1):
         start = keyframes[index]
         end = keyframes[index + 1]
+        if start.frame != end.frame:
+            raise ValueError("all keyframes must be in the same frame")
 
         key_times = np.array([0.0, 1.0], dtype=float)
         key_rots = Rotation.from_matrix(
-            np.stack([start.rotation, end.rotation], axis=0)
+            np.stack(
+                [
+                    start.orientation.as_rotation().as_matrix(),
+                    end.orientation.as_rotation().as_matrix(),
+                ],
+                axis=0,
+            )
         )
         slerp = Slerp(key_times, key_rots)
         samples = np.linspace(0.0, 1.0, frames_per_segment, endpoint=False)
         for t in samples:
-            translation = (1.0 - t) * start.translation + t * end.translation
-            rotation = slerp([t]).as_matrix()[0]
-            trajectory.append(Transform(rotation=rotation, translation=translation))
+            translation = (1.0 - t) * start.location.as_array() + t * end.location.as_array()
+            rotation = slerp([t])[0]
+            trajectory.append(
+                Pose(
+                    location=Location(translation, frame=start.frame),
+                    orientation=Orientation(rotation, frame=start.frame),
+                )
+            )
 
     trajectory.append(keyframes[-1])
     return trajectory
 
 
 def animate_object_poses(
-    poses: Sequence[Transform],
+    poses: Sequence[Pose],
     *,
     object_vertices: ArrayLike | None = None,
     object_edges: Sequence[tuple[int, int]] = DEFAULT_EDGES,
@@ -86,7 +99,9 @@ def animate_object_poses(
 ) -> tuple[Any, Any]:
     """Animate an object moving through space with translation and rotation."""
     if len(poses) == 0:
-        raise ValueError("poses must contain at least one Transform")
+        raise ValueError("poses must contain at least one Pose")
+    if len({pose.frame for pose in poses}) != 1:
+        raise ValueError("all poses must be expressed in the same frame")
 
     vertices = np.asarray(
         DEFAULT_VERTICES if object_vertices is None else object_vertices,
@@ -97,8 +112,16 @@ def animate_object_poses(
             f"object_vertices must have shape (N, 3), got {vertices.shape}"
         )
 
-    transformed_vertices = np.stack([pose.apply(vertices) for pose in poses], axis=0)
-    centers = np.stack([pose.translation for pose in poses], axis=0)
+    transformed_vertices = np.stack([pose.location.as_array() for pose in poses], axis=0)
+    transformed_vertices = np.stack(
+        [
+            pose.location.as_array()
+            + vertices @ pose.orientation.as_matrix().T
+            for pose in poses
+        ],
+        axis=0,
+    )
+    centers = np.stack([pose.location.as_array() for pose in poses], axis=0)
 
     try:
         import matplotlib.pyplot as plt
@@ -142,8 +165,8 @@ def animate_object_poses(
         for artist, (i, j) in zip(edge_artists, object_edges):
             _set_line_3d(artist, verts[i], verts[j])
 
-        origin = pose.translation
-        rotated_basis = pose.rotation @ np.eye(3)
+        origin = pose.location.as_array()
+        rotated_basis = pose.orientation.as_matrix() @ np.eye(3)
         for artist, axis_vec in zip(axis_artists, rotated_basis.T):
             _set_line_3d(artist, origin, origin + axis_scale * axis_vec)
 
@@ -171,3 +194,7 @@ def animate_object_poses(
     if show:
         plt.show()
     return fig, animation
+
+
+# Backward-compatible alias for the previous name.
+interpolate_transforms = interpolate_poses

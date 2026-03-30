@@ -1,11 +1,12 @@
 from pathlib import Path
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
-from pyspace import Transform, animate_object_poses
+from pyspace import FrameGraph, Pose, animate_object_poses
 
 
-def _helix_pose(theta: float, radius: float, pitch: float) -> Transform:
+def _helix_pose(theta: float, radius: float, pitch: float, world_frame) -> Pose:
     """Pose whose origin follows a helix, oriented along the tangent."""
     translation = np.array(
         [
@@ -31,28 +32,32 @@ def _helix_pose(theta: float, radius: float, pitch: float) -> Transform:
     y_axis = np.cross(z_axis, x_axis)
 
     rotation = np.column_stack((x_axis, y_axis, z_axis))
-    return Transform(rotation=rotation, translation=translation)
+    return world_frame.pose(translation=translation, rotation=Rotation.from_matrix(rotation))
 
 
 def build_helix_poses(
+    world_frame,
     num_frames: int = 240,
     turns: float = 3.0,
     radius: float = 2.0,
     pitch_per_radian: float = 0.15,
-) -> list[Transform]:
+) -> list[Pose]:
     thetas = np.linspace(0.0, 2.0 * np.pi * turns, num_frames)
     return [
-        _helix_pose(theta, radius=radius, pitch=pitch_per_radian)
+        _helix_pose(theta, radius=radius, pitch=pitch_per_radian, world_frame=world_frame)
         for theta in thetas
     ]
 
 
 if __name__ == "__main__":
+    graph = FrameGraph()
+    world = graph.add_frame("world")
+
     output_dir = Path("local/movies")
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "helix_reference_frame.gif"
 
-    poses = build_helix_poses()
+    poses = build_helix_poses(world)
     animate_object_poses(
         poses,
         interval_ms=1000 // 30,
