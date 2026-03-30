@@ -1,132 +1,66 @@
+from pathlib import Path
+
 import numpy as np
-from rendercanvas.auto import RenderCanvas, loop
-import pygfx as gfx
+
+from pyspace import Transform, animate_object_poses
 
 
-canvas = RenderCanvas(size=(1000, 1000))
-renderer = gfx.WgpuRenderer(canvas)
-
-position_pairs = [
-    [-1, -1, -1],
-    [-1, -1, 1],
-    [-1, -1, -1],
-    [-1, 1, -1],
-    [-1, -1, -1],
-    [1, -1, -1],
-    [1, 1, -1],
-    [1, 1, 1],
-    [1, 1, -1],
-    [1, -1, -1],
-    [1, 1, -1],
-    [-1, 1, -1],
-    [-1, 1, 1],
-    [-1, 1, -1],
-    [-1, 1, 1],
-    [-1, -1, 1],
-    [-1, 1, 1],
-    [1, 1, 1],
-    [1, -1, 1],
-    [1, -1, -1],
-    [1, -1, 1],
-    [1, 1, 1],
-    [1, -1, 1],
-    [-1, -1, 1],
-]
-position_pairs = 50 * np.array(position_pairs, np.float32)
-
-# Subdivide each edge into multiple points
-ndiv = 7
-positions1 = position_pairs[0::2]
-positions2 = position_pairs[1::2]
-positions = np.zeros((ndiv * len(position_pairs) // 2, 3), np.float32)
-for i in range(ndiv):
-    f = i / (ndiv - 1)
-    positions[i::ndiv] = (1.0 - f) * positions1 + f * positions2
-
-Material = gfx.PointsMaterial
-
-
-def add_three_cubes(parent, material):
-    line1 = gfx.Points(
-        gfx.Geometry(positions=positions),
-        material,
+def _helix_pose(theta: float, radius: float, pitch: float) -> Transform:
+    """Pose whose origin follows a helix, oriented along the tangent."""
+    translation = np.array(
+        [
+            radius * np.cos(theta),
+            radius * np.sin(theta),
+            pitch * theta,
+        ],
+        dtype=float,
     )
-    container1 = gfx.Scene()
-    parent.add(container1.add(line1))
 
-    line2 = gfx.Points(
-        gfx.Geometry(positions=positions / 2),
-        material,
+    tangent = np.array(
+        [-radius * np.sin(theta), radius * np.cos(theta), pitch],
+        dtype=float,
     )
-    container2 = gfx.Scene()
-    parent.add(container2.add(line2))
-    line2.local.scale = 2
+    z_axis = tangent / np.linalg.norm(tangent)
 
-    line3 = gfx.Points(
-        gfx.Geometry(positions=positions / 3.3333),
-        material,
-    )
-    container3 = gfx.Scene()
-    parent.add(container3.add(line3))
-    container3.local.scale = 3.3333
-    # Positioning
-    container1.local.position = -150, 0, 0
-    container3.local.position = 150, 0, 0
+    world_up = np.array([0.0, 0.0, 1.0], dtype=float)
+    x_axis = np.cross(world_up, z_axis)
+    if np.linalg.norm(x_axis) < 1e-8:
+        world_up = np.array([1.0, 0.0, 0.0], dtype=float)
+        x_axis = np.cross(world_up, z_axis)
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = np.cross(z_axis, x_axis)
+
+    rotation = np.column_stack((x_axis, y_axis, z_axis))
+    return Transform(rotation=rotation, translation=translation)
 
 
-top = gfx.Scene()  # screen
-middle = gfx.Scene()  # world
-bottom = gfx.Scene()  # model
+def build_helix_poses(
+    num_frames: int = 240,
+    turns: float = 3.0,
+    radius: float = 2.0,
+    pitch_per_radian: float = 0.15,
+) -> list[Transform]:
+    thetas = np.linspace(0.0, 2.0 * np.pi * turns, num_frames)
+    return [
+        _helix_pose(theta, radius=radius, pitch=pitch_per_radian)
+        for theta in thetas
+    ]
 
-top.local.position = 0, 150, 0
-bottom.local.position = 0, -150, 0
-
-scene = gfx.Scene()
-scene.add(top, middle, bottom)
-
-add_three_cubes(
-    top,
-    Material(
-        size=10,
-        size_space="screen",
-        color=(1.0, 0.0, 0.0),
-        alpha_mode="blend",
-        opacity=0.5,
-        aa=True,
-    ),
-)
-
-add_three_cubes(
-    middle,
-    Material(
-        size=10,
-        size_space="world",
-        color=(0.0, 1.0, 0.0),
-        alpha_mode="blend",
-        opacity=0.5,
-        aa=True,
-    ),
-)
-
-add_three_cubes(
-    bottom,
-    Material(
-        size=10,
-        size_space="model",
-        color=(0.0, 0.0, 1.0),
-        alpha_mode="blend",
-        opacity=0.5,
-        aa=True,
-    ),
-)
-
-camera = gfx.PerspectiveCamera(90)
-camera.show_object(scene)
-
-controller = gfx.OrbitController(camera, register_events=renderer)
-
-canvas.request_draw(lambda: renderer.render(scene, camera))
 
 if __name__ == "__main__":
-    print(__doc__)
-    loop.run()
+    output_dir = Path("local/movies")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "helix_reference_frame.gif"
+
+    poses = build_helix_poses()
+    animate_object_poses(
+        poses,
+        interval_ms=1000 // 30,
+        axis_scale=0.8,
+        show_path=True,
+        show=False,
+        save_path=str(output_path),
+        fps=30,
+    )
+
+    print(f"Saved movie to: {output_path.resolve()}")
