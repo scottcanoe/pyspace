@@ -85,11 +85,11 @@ class Edge:
 
     @property
     def u(self) -> Node:
-        return self._graph._edge_to_uv[self].u
+        return self._graph._edge_to_uv[self][0]
 
     @property
     def v(self) -> Node:
-        return self._graph._edge_to_uv[self].v
+        return self._graph._edge_to_uv[self][1]
 
     @property
     def data(self) -> Any:
@@ -104,10 +104,6 @@ class Edge:
     def __hash__(self) -> int:
         return self._hash_value
 
-
-class UV(NamedTuple):
-    u: Node
-    v: Node
 
 
 class PathStep(NamedTuple):
@@ -128,6 +124,7 @@ def auto_edge_id_from_nodes(u: Node, v: Node, sep: str = "->") -> EdgeID:
 
 @dataclass(frozen=True)
 class GraphToken:
+    """Unique token for identifying theis graph instance. For hash stability."""
     _id: str
 
 
@@ -144,7 +141,7 @@ class Graph:
         # Edges
         self._edge_id_generator: auto_edge_id_from_nodes
         self._edges: bidict[EdgeID, Edge] = bidict()
-        self._edge_to_uv: bidict[UV, Edge] = bidict()
+        self._edge_to_uv: bidict[Edge, tuple[Node, Node]] = bidict()
         self._edge_to_data: dict[Edge, Any] = {}
 
         # Path-finding
@@ -200,11 +197,10 @@ class Graph:
     ) -> Edge:
         u = self._as_valid_node(u)
         v = self._as_valid_node(v)
-        uv = UV(u, v)
-        if uv in self._edge_to_uv.values():
+        if (u, v) in self._edge_to_uv.inv:
             raise GraphError(f"Edge from {u} --> {v} already exists")
 
-        if UV(v, u) in self._edge_to_uv.values():
+        if (v, u) in self._edge_to_uv.inv:
             raise GraphError(f"Edge {u} <-- {v} already exists (inverse)")
 
         if edge_id is None:
@@ -215,7 +211,7 @@ class Graph:
         hash_value = hash((self._token, edge_id))
         edge = Edge(graph=self, edge_id=edge_id, hash_value=hash_value)
         self._edges[edge_id] = edge
-        self._edge_to_uv[edge] = uv
+        self._edge_to_uv[edge] = (u, v)
         self._edge_to_data[edge] = data
         self._cache = None
         return edge
@@ -223,7 +219,7 @@ class Graph:
     def remove_edge(self, edge: Edge | EdgeID) -> None:
         edge = self._as_valid_edge(edge)
         self._edges.pop(edge.edge_id)
-        self._edge_to_uv.pop(UV(edge.u, edge.v))
+        self._edge_to_uv.pop(edge)
         self._edge_to_data.pop(edge)
         self._cache = None
 
@@ -269,7 +265,7 @@ class Graph:
             next_node = node_index[next_node_index]
             inverse = bool(edge_directions[next_node_index, cur_node_index] == -1)
             u, v = (next_node, cur_node) if inverse else (cur_node, next_node)
-            edge = self._edge_to_uv.inv[UV(u, v)]
+            edge = self._edge_to_uv.inv[(u, v)]
             step = PathStep(edge=edge, inverse=inverse)
             path.append(step)
             cur_node, cur_node_index = next_node, next_node_index
@@ -286,7 +282,7 @@ class Graph:
         from pyspace.render import render_graph
 
         return render_graph(
-            self,
+            graph=self,
             view=view,
             filename=filename,
             directory=directory,
