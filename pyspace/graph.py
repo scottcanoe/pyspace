@@ -1,280 +1,191 @@
+"""Frame graph: a directed graph of reference frames and transforms."""
+
 from __future__ import annotations
 
 import os
 import uuid
 from dataclasses import dataclass
-from typing import (
-    Any,
-    Callable,
-    NamedTuple,
-    NewType,
-    Protocol,
-    Self,
-    TypeVar,
-)
+from typing import TYPE_CHECKING
 
 import numpy as np
 from bidict import bidict
 from scipy.sparse import csgraph
 
-NodeID = NewType("NodeID", str)
-EdgeID = NewType("EdgeID", str)
-UID = NewType("UID", int)
+from pyspace.exceptions import GraphError
+from pyspace.frame import Frame, FrameID
+from pyspace.transform import FrameTransform
 
-
-class GraphError(Exception):
-    pass
-
-
-class Node:
-    """A node in the graph.
-
-    Do not create these directly. They should always be created by a `Graph` instance.
-    """
-
-    def __init__(
-        self,
-        graph: Graph,
-        node_id: NodeID,
-        hash_value: int,
-    ) -> None:
-        self._graph = graph
-        self._node_id = node_id
-        self._hash_value = hash_value
-
-    @property
-    def graph(self) -> Graph:
-        return self._graph
-
-    @property
-    def node_id(self) -> NodeID:
-        return self._node_id
-
-    @property
-    def data(self) -> Any:
-        return self._graph._node_to_data["data"][self]
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({self._node_id})"
-
-    def __eq__(self, other: Any) -> bool:
-        return hash(self) == hash(other)
-
-    def __hash__(self) -> int:
-        return self._hash_value
-
-
-class Edge:
-    def __init__(
-        self,
-        graph: Graph,
-        edge_id: EdgeID,
-        hash_value: int,
-    ) -> None:
-        self._graph = graph
-        self._edge_id = edge_id
-        self._hash_value = hash_value
-
-    @property
-    def graph(self) -> Graph:
-        return self._graph
-
-    @property
-    def edge_id(self) -> EdgeID:
-        return self._edge_id
-
-    @property
-    def u(self) -> Node:
-        return self._graph._edge_to_uv[self].u
-
-    @property
-    def v(self) -> Node:
-        return self._graph._edge_to_uv[self].v
-
-    @property
-    def data(self) -> Any:
-        return self._graph._edge_to_data[self]
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({self._edge_id})"
-
-    def __eq__(self, other: Any) -> bool:
-        return hash(self) == hash(other)
-
-    def __hash__(self) -> int:
-        return self._hash_value
-
-
-class UV(NamedTuple):
-    u: Node
-    v: Node
-
-
-class PathStep(NamedTuple):
-    edge: Edge
-    inverse: bool
-
-
-@dataclass
-class GraphCache:
-    node_index: bidict[Node, int]
-    edge_directions: np.ndarray
-    predecessors: np.ndarray
-
-
-def auto_edge_id_from_nodes(u: Node, v: Node, sep: str = "->") -> EdgeID:
-    return EdgeID(f"{u.node_id}{sep}{v.node_id}")
+if TYPE_CHECKING:
+    from pyspace.protocols import TFrameTransformable
 
 
 @dataclass(frozen=True)
-class GraphToken:
-    _id: str
+class PathStep:
+    transform: FrameTransform
+    invert: bool
 
 
-class Graph:
+@dataclass
+class PathCache:
+    """Cached shortest-path data for the current graph topology."""
+
+    frame_index: bidict[Frame, int]
+    directions: np.ndarray
+    predecessors: np.ndarray
+
+
+class FrameGraph:
+    """A directed graph of reference frames connected by rigid transforms.
+
+    Transforms between arbitrary frames are found via shortest path on the
+    undirected view of the graph, then composed (inverting edges traversed
+    backward).
+    """
+
     def __init__(self) -> None:
-        # Unique token for identifying theis graph instance. For hash stability.
-        self._token = GraphToken(str(uuid.uuid4()))
-
-        # Nodes
-        self._node_id_generator = lambda: NodeID(str(uuid.uuid4()))
-        self._nodes: bidict[NodeID, Node] = bidict()
-        self._node_to_data: dict[NodeID, Any] = {}
-
-        # Edges
-        self._edge_id_generator: auto_edge_id_from_nodes
-        self._edges: bidict[EdgeID, Edge] = bidict()
-        self._edge_to_uv: bidict[UV, Edge] = bidict()
-        self._edge_to_data: dict[Edge, Any] = {}
-
-        # Path-finding
-        self._cache: GraphCache | None = None
+        self._frames: bidict[FrameID, Frame] = bidict()
+        self._transforms: bidict[tuple[Frame, Frame], FrameTransform] = bidict()
+        self._path_cache: PathCache | None = None
 
     @property
-    def nodes(self) -> bidict[NodeID, Node]:
-        return bidict(self._nodes)
+    def frames(self) -> bidict[FrameID, Frame]:
+        return bidict(self._frames)
 
     @property
-    def edges(self) -> bidict[EdgeID, Edge]:
-        return bidict(self._edges)
+    def transforms(self) -> bidict[tuple[Frame, Frame], FrameTransform]:
+        return bidict(self._transforms)
 
-    @property
-    def size(self) -> int:
-        return len(self._nodes)
+    def add_frame(self, frame_id: FrameID | None = None) -> Frame:
+        """Add a frame to the graph."""
+        frame_id = FrameID(str(uuid.uuid4())) if frame_id is None else frame_id
+        if frame_id in self._frames:
+            raise GraphError(f"Frame ID {frame_id} already in use.")
 
-    def add_node(
+        frame = Frame(graph=self, frame_id=frame_id)
+        self._frames[frame_id] = frame
+        self._path_cache = None
+        return frame
+
+    def remove_frame(self, frame: Frame | FrameID) -> None:
+        """Remove a frame and all transforms connected to it."""
+        frame = self._as_valid_frame(frame)
+        to_remove = [
+            t
+            for (f1, f2), t in self._transforms.items()
+            if frame in (f1, f2)
+        ]
+        for t in to_remove:
+            self.remove_transform(t)
+        self._frames.pop(frame.frame_id)
+        self._path_cache = None
+
+    def add_transform(self, transform: FrameTransform) -> FrameTransform:
+        """Add a transform edge between two frames already in the graph."""
+        from_frame, to_frame = transform.from_frame, transform.to_frame
+
+        if from_frame not in self._frames.inv or to_frame not in self._frames.inv:
+            raise GraphError(
+                "Both transform frames must already exist in the graph: "
+                f"{from_frame} -> {to_frame}"
+            )
+        if (from_frame, to_frame) in self._transforms:
+            raise GraphError(
+                f"Transform between {from_frame} and {to_frame} already exists"
+            )
+        if (to_frame, from_frame) in self._transforms:
+            raise GraphError(
+                f"Inverse transform between {to_frame} and {from_frame} already exists"
+            )
+        if from_frame == to_frame:
+            raise GraphError(f"Cannot add self-loop transform on {from_frame}")
+
+        self._transforms[(from_frame, to_frame)] = transform
+        self._path_cache = None
+        return transform
+
+    def set_transform(self, transform: FrameTransform) -> FrameTransform:
+        """Add or replace a transform between two frames.
+
+        Like :meth:`add_transform`, but silently replaces an existing
+        transform between the same pair of frames (in either direction).
+        """
+        from_frame, to_frame = transform.from_frame, transform.to_frame
+        key = (from_frame, to_frame)
+        inv_key = (to_frame, from_frame)
+        if key in self._transforms:
+            self._transforms.pop(key)
+            self._path_cache = None
+        elif inv_key in self._transforms:
+            self._transforms.pop(inv_key)
+            self._path_cache = None
+        return self.add_transform(transform)
+
+    def remove_transform(self, transform: FrameTransform) -> None:
+        """Remove a transform edge from the graph."""
+        key = (transform.from_frame, transform.to_frame)
+        if key not in self._transforms:
+            raise GraphError(f"{transform} not found in graph")
+        self._transforms.pop(key)
+        self._path_cache = None
+
+    def clear_transforms(self) -> None:
+        """Remove all transforms from the graph."""
+        self._transforms.clear()
+        self._path_cache = None
+
+    def path(
         self,
-        node_id: NodeID | None = None,
-        data: Any | None = None,
-    ) -> Node:
-        """Add a node to the graph."""
-
-        # Check `node_id` is avaialable.
-        node_id = self._node_id_generator() if node_id is None else node_id
-        if node_id in self._nodes:
-            raise GraphError(f"Node ID {node_id} already in use.")
-
-        hash_value = hash((self._token, node_id))
-        node = Node(graph=self, node_id=node_id, hash_value=hash_value)
-        self._nodes[node_id] = node
-        self._node_to_data[node] = data
-        self._cache = None
-        return node
-
-    def remove_node(self, node: Node | NodeID) -> None:
-        node = self._as_valid_node(node)
-        self._nodes.pop(node.node_id)
-        self._node_to_data.pop(node.node)
-        self._cache = None
-        for uv, edge in self._edges.items():
-            if node in uv:
-                self.remove_edge(edge)
-        self._cache = None
-
-    def add_edge(
-        self,
-        u: Node | NodeID,
-        v: Node | NodeID,
-        edge_id: EdgeID | None = None,
-        data: Any | None = None,
-    ) -> Edge:
-        u = self._as_valid_node(u)
-        v = self._as_valid_node(v)
-        uv = UV(u, v)
-        if uv in self._edge_to_uv.values():
-            raise GraphError(f"Edge from {u} --> {v} already exists")
-
-        if UV(v, u) in self._edge_to_uv.values():
-            raise GraphError(f"Edge {u} <-- {v} already exists (inverse)")
-
-        if edge_id is None:
-            edge_id = auto_edge_id_from_nodes(u, v)
-        if edge_id in self._edges:
-            raise GraphError(f"Edge ID {edge_id} already in use.")
-
-        hash_value = hash((self._token, edge_id))
-        edge = Edge(graph=self, edge_id=edge_id, hash_value=hash_value)
-        self._edges[edge_id] = edge
-        self._edge_to_uv[edge] = uv
-        self._edge_to_data[edge] = data
-        self._cache = None
-        return edge
-
-    def remove_edge(self, edge: Edge | EdgeID) -> None:
-        edge = self._as_valid_edge(edge)
-        self._edges.pop(edge.edge_id)
-        self._edge_to_uv.pop(UV(edge.u, edge.v))
-        self._edge_to_data.pop(edge)
-        self._cache = None
-
-    def clear_edges(self) -> None:
-        self._edges.clear()
-        self._edge_to_uv.clear()
-        self._edge_to_data.clear()
-        self._cache = None
-
-    def shortest_path(
-        self,
-        source: Node | NodeID,
-        target: Node | NodeID,
+        from_frame: Frame | FrameID,
+        to_frame: Frame | FrameID,
     ) -> list[PathStep]:
-        """Return edges and edge directions for path between two nodes.
+        """Return the shortest sequence of transform steps between two frames.
 
         Raises:
-            RuntimeError: If start and end aren't connected.
-
+            GraphError: If no path exists between the frames.
         """
-        if self._cache is None:
-            self._compute_shortest_paths()
+        if self._path_cache is None:
+            self._compute_paths()
 
-        source = self._as_valid_node(source)
-        target = self._as_valid_node(target)
-        if source == target:
+        from_frame = self._as_valid_frame(from_frame)
+        to_frame = self._as_valid_frame(to_frame)
+        if from_frame == to_frame:
             return []
 
-        node_index: bidict[int, Node] = self._cache.node_index
-        edge_directions: np.ndarray = self._cache.edge_directions
-        predecessors: np.ndarray = self._cache.predecessors
+        frame_index = self._path_cache.frame_index
+        edge_directions = self._path_cache.directions
+        predecessors = self._path_cache.predecessors
 
-        cur_node: Node = source
-        cur_node_index = node_index.inv[cur_node]
-        target_node_index = node_index.inv[target]
+        cur_frame = from_frame
+        cur_idx = frame_index[cur_frame]
+        target_idx = frame_index[to_frame]
 
-        if predecessors[target_node_index, cur_node_index] < 0:
-            raise GraphError(f"No path found from {source} to {target}")
+        if predecessors[target_idx, cur_idx] < 0:
+            raise GraphError(f"No path found from {from_frame} to {to_frame}")
 
         path: list[PathStep] = []
-        while cur_node_index != target_node_index:
-            next_node_index = predecessors[target_node_index, cur_node_index]
-            next_node = node_index[next_node_index]
-            inverse = bool(edge_directions[next_node_index, cur_node_index] == -1)
-            u, v = (next_node, cur_node) if inverse else (cur_node, next_node)
-            edge = self._edge_to_uv.inv[UV(u, v)]
-            step = PathStep(edge=edge, inverse=inverse)
-            path.append(step)
-            cur_node, cur_node_index = next_node, next_node_index
+        while cur_idx != target_idx:
+            next_idx = predecessors[target_idx, cur_idx]
+            next_frame = frame_index.inv[next_idx]
+            invert = bool(edge_directions[next_idx, cur_idx] == -1)
+            frames = (next_frame, cur_frame) if invert else (cur_frame, next_frame)
+            transform = self._transforms[frames]
+            path.append(PathStep(transform=transform, invert=invert))
+            cur_frame, cur_idx = next_frame, next_idx
 
         return path
+
+    def transform(
+        self,
+        obj: TFrameTransformable,
+        to_frame: Frame | FrameID,
+    ) -> TFrameTransformable:
+        """Transform an object from its current frame to a target frame."""
+        path = self.path(obj.frame, to_frame)
+        transformed = obj
+        for step in path:
+            t = step.transform.inv() if step.invert else step.transform
+            transformed = t.apply(transformed)
+        return transformed
 
     def show(
         self,
@@ -293,86 +204,51 @@ class Graph:
             **kwargs,
         )
 
-    def _as_valid_node(self, node: Node | NodeID) -> Node:
+    def _as_valid_frame(self, frame: Frame | FrameID) -> Frame:
+        if frame in self._frames.inv:
+            return frame
         try:
-            return self._nodes.get(node, self._nodes.inv.get(node))
+            return self._frames[frame]
         except KeyError:
-            raise GraphError(f"{node} not found in graph")
+            raise GraphError(f"{frame} not found in graph")
 
-    def _as_valid_edge(self, edge: Edge | EdgeID) -> Edge:
-        try:
-            return self._edges.get(edge, self._edges.inv.get(edge))
-        except KeyError:
-            raise GraphError(f"{edge} not found in graph")
+    def _compute_paths(self) -> None:
+        """Compute and cache all-pairs shortest path info."""
+        n = len(self._frames)
+        frame_index = bidict(
+            {frame: i for i, frame in enumerate(self._frames.values())}
+        )
 
-    def _compute_shortest_paths(self) -> None:
-        """Compute and store all shortest path info."""
-
-        if len(self._nodes) == 0:
-            self._cache = GraphCache(
-                node_index=bidict(),
-                edge_directions=np.zeros((0, 0), dtype=np.int8),
-                predecessors=np.empty((0, 0), dtype=int),
+        if n == 0 or len(self._transforms) == 0:
+            self._path_cache = PathCache(
+                frame_index=frame_index,
+                directions=np.zeros((n, n), dtype=np.int8),
+                predecessors=np.full((n, n), -9999, dtype=int),
             )
             return
 
-        node_index = bidict({i: node for i, node in enumerate(self._nodes.values())})
         from_indices, to_indices = zip(
             *(
-                (node_index.inv[edge.u], node_index.inv[edge.v])
-                for edge in self._edges.values()
+                (frame_index[t.from_frame], frame_index[t.to_frame])
+                for t in self._transforms.values()
             )
         )
-        edge_directions = np.zeros((len(self._nodes), len(self._nodes)), dtype=np.int8)
-        edge_directions[to_indices, from_indices] = 1
+        directions = np.zeros((n, n), dtype=np.int8)
+        directions[to_indices, from_indices] = 1
         _, predecessors = csgraph.shortest_path(
-            edge_directions,
+            directions,
             unweighted=True,
             directed=False,
             method="D",
             return_predecessors=True,
         )
-        edge_directions[from_indices, to_indices] = -1
+        directions[from_indices, to_indices] = -1
 
-        self._cache = GraphCache(
-            node_index=node_index,
-            edge_directions=edge_directions,
+        self._path_cache = PathCache(
+            frame_index=frame_index,
+            directions=directions,
             predecessors=predecessors,
         )
 
-    def __getitem__(self, node_id: NodeID) -> Node:
-        return self._nodes[node_id]
-
-
-"""
---------------------------------------------------------------------------------------
-Possible Constraints:
- - Unique parent
- - No cycles
-
-
-"""
-
-
-if __name__ == "__main__":
-    # Create a graph with reference nodes A, B, and C.
-    graph = Graph()
-    root = graph.add_node("root")
-    a = graph.add_node("a")
-    b = graph.add_node("b")
-    c = graph.add_node("c")
-    x = graph.add_node("x")
-    y = graph.add_node("y")
-    z = graph.add_node("z")
-
-    graph.add_edge("a", "root")
-    graph.add_edge("b", "a")
-    graph.add_edge("c", "a")
-    graph.add_edge("x", "root")
-    graph.add_edge("y", "x")
-    graph.add_edge("z", "x")
-
-    # graph.show(view=True)
-    path = graph.shortest_path("a", "z")
-    for step in path:
-        print(step)
+    def __getitem__(self, frame_id: FrameID) -> Frame:
+        return self._frames[frame_id]

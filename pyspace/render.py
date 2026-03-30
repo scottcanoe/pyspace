@@ -1,3 +1,5 @@
+"""Graphviz rendering for a FrameGraph."""
+
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -5,31 +7,31 @@ from typing import TYPE_CHECKING
 from graphviz import Digraph
 
 if TYPE_CHECKING:
-    from pyspace.graph import Graph
-
+    from pyspace.graph import FrameGraph
 
 DEFAULT_GRAPHVIZ_DIRECTORY = Path(__file__).parent.parent / "local" / "graphviz"
 
 
 def render_graph(
-    graph,
+    graph: FrameGraph,
     filename: str = "graph",
     directory: os.PathLike | None = None,
     view: bool = False,
     **kwargs,
-) -> None:
-
+) -> Digraph:
     if directory is None:
         directory = DEFAULT_GRAPHVIZ_DIRECTORY
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+
     g = Digraph()
-    for node_id, node in graph.nodes.items():
-        g.node(node_id)
-    for edge_id, edge in graph.edges.items():
-        g.edge(edge.u.node_id, edge.v.node_id)
+    for frame_id in graph.frames:
+        g.node(str(frame_id))
+    for (from_frame, to_frame) in graph.transforms:
+        g.edge(str(from_frame.frame_id), str(to_frame.frame_id))
     g.render(filename=filename, directory=directory, **kwargs)
 
     if view:
         g.view()
-    
-    return g
 
+    return g
