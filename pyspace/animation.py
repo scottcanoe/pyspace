@@ -9,7 +9,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 from scipy.spatial.transform import Rotation, Slerp
 
-from pyspace.frames import Location, Orientation, Pose
+from pyspace.transform_graph import Location, Orientation, Pose
 
 DEFAULT_VERTICES = np.array(
     [

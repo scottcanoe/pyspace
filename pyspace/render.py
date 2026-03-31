@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from graphviz import Digraph
 
 if TYPE_CHECKING:
-    from pyspace.graph import Graph
+    from pyspace.transform_graph import Graph
 
 
 DEFAULT_GRAPHVIZ_DIRECTORY = Path(__file__).parent.parent / "local" / "graphviz"

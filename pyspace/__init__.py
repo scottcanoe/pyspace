@@ -1,19 +1,23 @@
 """Geometry and reference-frame utilities."""
 
 from pyspace.animation import animate_object_poses, interpolate_poses, interpolate_transforms
-from pyspace.frames import (
+from pyspace.transform_graph import (
     Frame,
-    FrameGraph,
-    FrameGraphError,
     FrameMismatchError,
-    FrameNotFoundError,
     FrameTransform,
+    Graph,
+    GraphError,
     Location,
     Orientation,
     Pose,
-    TransformNotFoundError,
-    Transform,
 )
+
+# Backward-compatible aliases for older external API names.
+FrameGraph = Graph
+FrameGraphError = GraphError
+FrameNotFoundError = GraphError
+TransformNotFoundError = GraphError
+Transform = FrameTransform
 
 __all__ = [
     "animate_object_poses",

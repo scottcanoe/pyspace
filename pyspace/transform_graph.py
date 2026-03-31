@@ -22,7 +22,7 @@ from scipy.sparse import csgraph
 from scipy.spatial.transform import RigidTransform, Rotation
 
 FrameID = NewType("FrameID", str)
-
+TransformID = NewType("TransformID", str)
 
 class GraphError(Exception):
     pass
@@ -80,13 +80,13 @@ class FrameTransform:
     """
     def __init__(
         self,
-        transform: RigidTransform,
+        rigid_transform: RigidTransform,
         from_frame: Frame,
         to_frame: Frame,
     ) -> None:
-        self._transform = transform
+        self._rigid_transform = rigid_transform
         self._from_frame = from_frame
-        self._to_frame = to_frame
+        self._to_frame = to_frame        
 
     @property
     def from_frame(self) -> Frame:
@@ -98,17 +98,17 @@ class FrameTransform:
 
     @property
     def translation(self) -> np.ndarray:
-        return self._transform.translation
+        return self._rigid_transform.translation
 
     @property
     def rotation(self) -> Rotation:
-        return self._transform.rotation
+        return self._rigid_transform.rotation
     
     def as_components(self) -> tuple[np.ndarray, Rotation]:
-        return self._transform.translation, self._transform.rotation
+        return self._rigid_transform.translation, self._rigid_transform.rotation
     
     def as_rigid_transform(self) -> RigidTransform:
-        return self._transform
+        return self._rigid_transform
     
     @staticmethod
     def from_components(
@@ -117,30 +117,30 @@ class FrameTransform:
         from_frame: Frame,
         to_frame: Frame,
     ) -> FrameTransform:
-        transform = RigidTransform.from_components(
+        rigid_transform = RigidTransform.from_components(
             rotation=rotation, translation=translation,
         )
         return FrameTransform(
-            transform=transform,
+            rigid_transform=rigid_transform,
             from_frame=from_frame,
             to_frame=to_frame,
         )
     
     @staticmethod
     def from_rigid_transform(
-        transform: RigidTransform,
+        rigid_transform: RigidTransform,
         from_frame: Frame,
         to_frame: Frame,
         ) -> FrameTransform:
         return FrameTransform(
-            transform=transform,
+            rigid_transform=rigid_transform,
             from_frame=from_frame,
             to_frame=to_frame,
         )
 
     def inv(self) -> FrameTransform:
         return FrameTransform(
-            transform=self._transform.inv(),
+            rigid_transform=self._rigid_transform.inv(),
             from_frame=self._to_frame,
             to_frame=self._from_frame,
         )
@@ -167,7 +167,7 @@ class FrameTransform:
 @dataclass(frozen=True)
 class PathStep:
     transform: FrameTransform
-    inverse: bool
+    invert: bool
 
 
 @dataclass
@@ -181,76 +181,62 @@ class GraphCache:
 class Graph:
     def __init__(self) -> None:
         # reference frames (nodes)
-        self._frame_id_generator: Callable[[], FrameID] = lambda: FrameID(
-            str(uuid.uuid4())
-        )
-        self._frames: set[Frame] = set()
-        self._frame_id_to_frame: dict[FrameID, Frame] = {}
-
+        self._frames: bidict[FrameID, Frame] = bidict()
+        
         # reference frame transforms (edges)
-        self._transforms: set[FrameTransform] = set()
-        self._frames_to_transform: dict[tuple[Frame, Frame], FrameTransform] = {}
+        self._transforms: bidict[tuple[Frame, Frame], FrameTransform] = bidict()
 
         # shortest paths
         self._cache: GraphCache | None = None
 
     @property
-    def frames(self) -> set[Frame]:
-        return set(self._frames)
+    def frames(self) -> bidict[FrameID, Frame]:
+        return bidict(self._frames)
 
     @property
-    def transforms(self) -> set[FrameTransform]:
-        return set(self._transforms)
+    def transforms(self) -> bidict[tuple[Frame, Frame], FrameTransform]:
+        return bidict(self._transforms)
 
     @property
     def size(self) -> int:
         return len(self._frames)
 
-    def add_frame(
-        self,
-        frame_id: FrameID | None = None,
-    ) -> Frame:
+    def add_frame(self, frame_id: FrameID | None = None) -> Frame:
         """Add a frame to the graph."""
 
-        # Check `uid` won't clash.
-        frame_id = self._frame_id_generator() if frame_id is None else frame_id
-        if frame_id in self._frame_id_to_frame:
+        # Enforce uniqueness of frame ID.
+        frame_id = FrameID(str(uuid.uuid4())) if frame_id is None else frame_id
+        if frame_id in self._frames:
             raise GraphError(f"Frame ID {frame_id} already in use.")
         
         frame = Frame(graph=self, frame_id=frame_id)
-        self._frames.add(frame)
-        self._frame_id_to_frame[frame_id] = frame
+        self._frames[frame_id] = frame
         self._cache = None
         return frame
 
     def remove_frame(self, frame: Frame | FrameID) -> None:
         frame = self._as_valid_frame(frame)
-        self._frames.discard(frame)
-        self._frame_id_to_frame.pop(frame.frame_id)
+        self._frames.pop(frame.frame_id)
         self._cache = None
-        transforms_to_remove = []
-        for (from_frame, to_frame), tform in self._frames_to_transform.items():
-            if frame in (from_frame, to_frame):
-                transforms_to_remove.append(tform)
-        for transform in transforms_to_remove:
-            self.remove_transform(transform)
+        for frames, transform in self._transforms.items():
+            if frame in frames:
+                self.remove_transform(transform)
+                
+    def add_transform(self, transform: FrameTransform) -> FrameTransform:
 
-    def add_transform(self, tform: FrameTransform) -> FrameTransform:
-
-        from_frame = tform.from_frame
-        to_frame = tform.to_frame
-        if from_frame not in self._frames or to_frame not in self._frames:
+        from_frame, to_frame = transform.from_frame, transform.to_frame
+        if from_frame not in self._frames.inv or to_frame not in self._frames.inv:
             raise GraphError(
                 "Both transform frames must already exist in the graph: "
                 f"{from_frame} -> {to_frame}"
             )
         
-        if (from_frame, to_frame) in self._frames_to_transform:
+        if (from_frame, to_frame) in self._transforms:
             raise GraphError(
                 f"Transform between {from_frame} and {to_frame} already exists"
             )
         
-        if (to_frame, from_frame) in self._frames_to_transform:
+        if (to_frame, from_frame) in self._transforms.inv:
             raise GraphError(
                 f"Inverse transform between {to_frame} and {from_frame} already exists"
             )
@@ -258,21 +244,18 @@ class Graph:
             raise GraphError(
                 f"Cannot set transform between {from_frame} and {to_frame} (self)"
             )
-        
-        self._transforms.add(tform)
-        self._frames_to_transform[(from_frame, to_frame)] = tform
+         
+        self._transforms[(from_frame, to_frame)] = transform
         self._cache = None
-        return tform
-
-    def remove_transform(self, tform: FrameTransform) -> None:
-        
-        self._transforms.remove(tform)
-        self._frames_to_transform.pop((tform.from_frame, tform.to_frame))
-        self._cache = None
+        return transform
     
+    def remove_transform(self, transform: FrameTransform) -> None:
+        transform = self._as_valid_transform(transform)
+        self._transforms.pop((transform.from_frame, transform.to_frame))
+        self._cache = None
+
     def clear_transforms(self) -> None:
         self._transforms.clear()
-        self._frames_to_transform.clear()
         self._cache = None
 
     def shortest_path(
@@ -311,11 +294,10 @@ class Graph:
         while cur_frame_index != target_frame_index:
             next_frame_index = predecessors[target_frame_index, cur_frame_index]
             next_frame = frame_index.inv[next_frame_index]
-            inverse = bool(edge_directions[next_frame_index, cur_frame_index] == -1)
-            frames = (next_frame, cur_frame) if inverse else (cur_frame, next_frame)
-            tform = self._frames_to_transform[frames]
-            step = PathStep(transform=tform, inverse=inverse)
-            path.append(step)
+            invert = bool(edge_directions[next_frame_index, cur_frame_index] == -1)
+            frames = (next_frame, cur_frame) if invert else (cur_frame, next_frame)
+            transform = self._transforms[frames]
+            path.append(PathStep(transform=transform, invert=invert))
             cur_frame, cur_frame_index = next_frame, next_frame_index
 
         return path
@@ -333,10 +315,8 @@ class Graph:
         path: list[PathStep] = self.shortest_path(obj.frame, to_frame)
         transformed = obj
         for step in path:
-            tform = step.transform
-            if step.inverse:
-                tform = tform.inv()
-            transformed = tform.apply(transformed)
+            transform = step.transform.inv() if step.invert else step.transform
+            transformed = transform.apply(transformed)
         return transformed
 
 
@@ -355,15 +335,16 @@ class Graph:
             directory=directory,
             **kwargs,
         )
+    
 
     def _as_valid_frame(self, frame: Frame | FrameID) -> Frame:
-        if frame in self._frames:
+        if frame in self._frames.inv:
             return frame
         try:
-            return self._frame_id_to_frame[frame]
+            return self._frames[frame]
         except KeyError:
-            raise GraphError(f"Frame {frame} not found in graph")
-    
+            raise GraphError(f"{frame} not found in graph")
+
 
     def _compute_shortest_paths(self) -> None:
         """Compute and store all shortest path info."""
@@ -376,11 +357,12 @@ class Graph:
             )
             return
 
-        frame_index = bidict({frame: i for i, frame in enumerate(self._frames)})
+        frame_index = bidict({frame: i for i, frame in enumerate(self._frames.values())})
+        
         from_indices, to_indices = zip(
             *(
                 (frame_index[tform.from_frame], frame_index[tform.to_frame])
-                for tform in self._transforms
+                for tform in self._transforms.values()
             )
         )
         edge_directions = np.zeros(
