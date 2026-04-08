@@ -1,11 +1,13 @@
 # pyspace
 
-A library for managing rigid reference frames as a graph and transforming
-geometric objects between them.
+A library for managing reference frames and transforming coordinates between them.
 
 You define **frames** (nodes) and **frame transforms** (edges), then ask for any
 object to be expressed in any other frame — pyspace finds the shortest path
-through the graph and composes transforms automatically.
+through the graph and composes + applies transforms automatically.
+The transformation logic also depends upon the type of object being transformed.
+For example, locations will be rotated and translated, whereas displacements
+will only be rotated.
 
 One of the main ideas here is that we don't want to care about what the
 kinematic chain is, or whether we get location and orientation information
@@ -33,9 +35,9 @@ world = graph.add_frame("world")
 agent = graph.add_frame("agent")
 sensor = graph.add_frame("sensor")
 
-# Let's the proprioceptive data we get is in local coordinates
-# i.e., defined relative to a parent frame. Then we might receive agent and
-# sensor poses like this:
+# Let's say the proprioceptive data we get is in local coordinates
+# i.e., defined relative to a parent frame like Habitat. Then we might receive
+# agent and sensor poses like this:
 # - agent pose, relative to the world
 agent_location = np.array([0.0, 1.5, 0.0])
 agent_orientation = Rotation.from_euler("xyz", [0, 30, 0], degrees=True)
@@ -81,9 +83,9 @@ pose_rel_sensor = pose_rel_world.to(agent)
 
 ```
 Instead of receiving data in local coordinates, let's say we receive it in
-world coordinates. The only difference on our end is how we add the transforms.
-We'll reuse the graph/frames, clear the existing transforms, and add new
-transforms.
+world coordinates (e.g., for MuJoCo). The only difference on our end is how we
+add the transforms. We'll reuse the graph/frames, clear the existing transforms,
+and add new transforms.
 
 ```python
 graph.clear_transforms()
@@ -95,7 +97,8 @@ agent_orientation = Rotation.from_euler("xyz", [0, 30, 0], degrees=True)
 sensor_location = np.array([0.0, 1.5, 0.0])
 sensor_orientation = Rotation.from_euler("xyz", [20, 30, 0], degrees=True)
 
-# Add the new transforms.
+# Add the transforms, adjusting the to_frame arguments to match the
+# coordinates we started with.
 graph.add_transform(FrameTransform.from_translation_and_rotation(
     translation=agent_location,
     rotation=agent_orientation,
@@ -109,9 +112,32 @@ graph.add_transform(FrameTransform.from_translation_and_rotation(
     to_frame=world,
 ))
 ```
-Note that we're just supplying diffreent `from_frame` and `to_frame` arguments
-when we add the transform.
+Also, geometry like `Location` doesn't have to contain only single 3-vector.
+It can be a stack/array of coordinates, so long as the last dimension has
+length 3. TODO: add example.
 
+## Potential Improvements
+Currently, there's no support for mapping between coordinate systems, as in
+mapping between cartesian and spherical coordinates within the same frame. For
+that matter, we also assume the same axes convention (i.e., right-up-backward).
+These things could be implemented with the current code by adding custom
+transforms and treating a spherical coordinate system as another frame in the
+graph, but that doesn't feel complete to me.
+
+It might also be nice to lock coordinates down to a timestamp so that we don't
+accidentally try to use on to stale coordinates.
+
+The user is also responsible for making sure the graph is well-formed. One
+could have multiple paths between frames that have non-equivalent transforms.
+I'm not terribly concerned about this, but one could add a way to enforce
+constraints when constructing the graph.
+
+As for performance, there's no cacheing of transforms, which could be a 
+bottleneck in some scenarios. Also, not all frame transformations necessarily
+need to undergo both translation and rotation (just depending on what the
+actual relationship is between frames). Not a huge concern right now,
+but in theory, the implementation could reflect which actual operations need
+to take place.
 
 ## Main Componenents and Usage
 
